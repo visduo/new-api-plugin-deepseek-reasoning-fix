@@ -45,9 +45,19 @@ For every `assistant` message whose `reasoning_content` is missing, an empty str
 
 Existing non-empty `reasoning_content` values are left unchanged. The original provider field and `reasoning` field stay in the message. An empty string or `null` is treated as missing and replaced.
 
+When the value comes from `provider_specific_fields.reasoning_content` or `reasoning`, the plugin emits a JSON Patch `copy` operation instead of repeating the text in the patch. This keeps the plugin result small when reasoning text is long. The placeholder case uses a short `add` operation.
+
+When eight or more assistant messages need the field and the request has no inline media, the plugin combines them into one `replace /messages` operation. This avoids the gateway re-parsing the body once per message. Smaller conversations and requests with inline media use per-message `copy` or `add` operations.
+
 The trigger is the presence of tools, not a particular `tool_calls` entry. Once a request has a non-empty `tools` array, every assistant message missing the field is filled, including assistant messages that are not part of a tool call.
 
 At most 512 assistant messages are filled in one request. Assistant messages after that limit are left unchanged. Each changed request records the finding `deepseek.reasoning_content_filled` with the number of messages filled.
+
+A combined replacement is used only when its JSON is at most 32 MiB. A larger request falls back to per-message operations.
+
+## Checking latency
+
+The plugin changes the request before it is sent upstream, so a slow first token can come from the upstream model, a long prompt, or the gateway's audit of the changes. The administrator's request log shows each request plugin step under `other.admin_info.request_plugins`, including its `duration_ms`. A small plugin duration means the wait is elsewhere.
 
 ## Stages
 

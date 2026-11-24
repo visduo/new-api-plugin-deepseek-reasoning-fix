@@ -44,9 +44,19 @@ locale: zh-CN
 
 已有的非空 `reasoning_content` 不会被修改。原来的 provider 字段和 `reasoning` 字段会保留在消息里。空串和 `null` 会被当作缺失并替换。
 
+取值来自 `provider_specific_fields.reasoning_content` 或 `reasoning` 时，插件使用 JSON Patch 的 `copy` 操作，而不是在补丁里重复推理文本。推理内容很长时，插件结果仍然很小。使用占位内容时则是一条简短的 `add` 操作。
+
+有 8 条或更多助手消息需要补字段、且请求没有内联媒体时，插件把它们合并成一次 `replace /messages` 操作，避免网关为每条消息重复解析整包 JSON。更少的消息或带内联媒体的请求仍使用逐条 `copy` 或 `add`。
+
 触发条件是请求带有工具，而不是某条具体的 `tool_calls`。只要 `tools` 非空，所有缺少该字段的助手消息都会被补全，包括不参与工具调用的助手消息。
 
 单个请求最多补全 512 条助手消息，之后的助手消息保持原样。每次发生改写时，请求记录会带有 `deepseek.reasoning_content_filled`，计数为补全的消息数量。
+
+只有合并后的 JSON 不超过 32 MiB 时才使用整体替换；更大的请求退回逐条操作。
+
+## 排查延迟
+
+插件只在上游请求发出前改写请求体，因此首 token 慢可能来自上游模型、长提示词，或网关对改动的审计。管理员的请求日志会在 `other.admin_info.request_plugins` 中列出每个请求插件步骤及其 `duration_ms`。如果插件耗时很小，等待发生在别处。
 
 ## 运行阶段
 

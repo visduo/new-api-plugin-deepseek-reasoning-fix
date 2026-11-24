@@ -1,14 +1,13 @@
 ---
 changelogVersion: 1
-plugin: "deepseek-reasoning-fix"
-version: "1.0.0"
+plugin: "visduo_deepseek-reasoning-fix"
+version: "1.0.1"
 locale: "zh-CN"
 ---
 # Changelog
 
-## [1.0.0]
+## [1.0.1]
 
-### Added
+### Fixed
 
-- 为携带工具的 DeepSeek 思考模式请求补全助手消息中缺失的 `reasoning_content`。
-- 可配置占位推理文本，以及用逗号分隔、用于筛选请求的模型关键字。
+- 已有推理文本改用 JSON Patch 的 `copy` 操作，较长的对话合并为一次 `replace /messages`，插件结果不再逐条重复大段推理内容，降低处理延迟。

@@ -1,12 +1,12 @@
 export const meta = {
   apiVersion: 1,
-  key: "deepseek-reasoning-fix",
+  key: "visduo_deepseek-reasoning-fix",
   name: { en: "DeepSeek reasoning_content fix", zh: "DeepSeek reasoning_content 补全" },
   description: {
     en: "Fills missing reasoning_content on assistant messages so DeepSeek thinking mode with tools stops returning 400",
     zh: "为助手消息补全缺失的 reasoning_content，避免 DeepSeek 思考模式携带工具时返回 400",
   },
-  version: "1.0.0",
+  version: "1.0.1",
   author: { name: "多栈科技" },
   website: "https://www.echostack.net/",
   optional: true,
@@ -85,7 +85,8 @@ function modelMatches(ctx, body, keywords) {
 }
 
 // 优先沿用消息里已有的推理文本，最后才用占位值。
-function reasoningValue(message, placeholder) {
+// 已有文本用 copy 操作引用原路径，避免把大段推理内容复制进补丁。
+function reasoningText(message, placeholder) {
   if (isObject(message.provider_specific_fields) && filled(message.provider_specific_fields.reasoning_content)) {
     return message.provider_specific_fields.reasoning_content;
   }
@@ -93,27 +94,90 @@ function reasoningValue(message, placeholder) {
   return placeholder;
 }
 
-// 为每个缺少 reasoning_content 的 assistant 消息生成一条 add 操作。
-// 同一路径的 add 在 RFC 6902 里等价于覆盖，所以空串与 null 也会被替换。
-function buildPatch(body, placeholder) {
+function reasoningOperation(message, index, placeholder) {
+  if (isObject(message.provider_specific_fields) && filled(message.provider_specific_fields.reasoning_content)) {
+    return {
+      op: "copy",
+      from: "/messages/" + index + "/provider_specific_fields/reasoning_content",
+      path: "/messages/" + index + "/reasoning_content",
+    };
+  }
+  if (filled(message.reasoning)) {
+    return {
+      op: "copy",
+      from: "/messages/" + index + "/reasoning",
+      path: "/messages/" + index + "/reasoning_content",
+    };
+  }
+  return {
+    op: "add",
+    path: "/messages/" + index + "/reasoning_content",
+    value: placeholder,
+  };
+}
+
+// 单次 replace /messages 的补丁体积上限。超过时退回逐条操作，
+// 避免把媒体占位符或超大请求体塞进一次 replace。
+const MAX_REPLACE_BYTES = 32 << 20;
+// 少量消息逐条 copy 更省事；消息较多时合并，避免网关重复解析整包 JSON。
+const MIN_REPLACE_MESSAGES = 8;
+
+// 请求体里是否内联了媒体。网关会把它们替换成 [media:N]，
+// 而 json.patch 的 value 不允许包含这个占位符。
+function hasInlineMedia(value, depth) {
+  if (depth > 64) return true;
+  if (typeof value === "string") return value.indexOf("data:") >= 0 || value.indexOf("[media:") >= 0;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      if (hasInlineMedia(item, depth + 1)) return true;
+    }
+    return false;
+  }
+  if (isObject(value)) {
+    if (value.type === "base64" && filled(value.data)) return true;
+    if (isObject(value.inlineData) && filled(value.inlineData.data)) return true;
+    if (isObject(value.inline_data) && filled(value.inline_data.data)) return true;
+    for (const key of Object.keys(value)) {
+      if (hasInlineMedia(value[key], depth + 1)) return true;
+    }
+  }
+  return false;
+}
+
+// 为每个缺少 reasoning_content 的 assistant 消息生成一条操作。
+// 同一路径的 add 或 copy 在 RFC 6902 里等价于覆盖，所以空串与 null 也会被替换。
+// 长对话合并为一次 replace /messages，避免网关为每条补丁重复解析整包 JSON。
+function buildPatch(body, placeholder, allowReplace) {
   const messages = body.messages;
   if (!Array.isArray(messages)) return null;
-  const ops = [];
-  let count = 0;
+  const missing = [];
   for (let i = 0; i < messages.length; i++) {
-    if (ops.length >= MAX_PATCH_OPS) break;
     const message = messages[i];
     if (!isObject(message) || message.role !== "assistant") continue;
     if (filled(message.reasoning_content)) continue;
-    ops.push({
-      op: "add",
-      path: "/messages/" + i + "/reasoning_content",
-      value: reasoningValue(message, placeholder),
-    });
-    count++;
+    missing.push(i);
+    if (missing.length >= MAX_PATCH_OPS) break;
   }
-  if (ops.length === 0) return null;
-  return { ops: ops, count: count };
+  if (missing.length === 0) return null;
+  if (allowReplace && missing.length >= MIN_REPLACE_MESSAGES) {
+    const messagesCopy = messages.slice();
+    for (const i of missing) {
+      const message = messages[i];
+      const next = Object.assign({}, message);
+      next.reasoning_content = reasoningText(message, placeholder);
+      messagesCopy[i] = next;
+    }
+    const replacement = [{ op: "replace", path: "/messages", value: messagesCopy }];
+    if (JSON.stringify(replacement).length <= MAX_REPLACE_BYTES) {
+      return { ops: replacement, count: missing.length };
+    }
+  }
+  const ops = [];
+  for (const i of missing) {
+    if (ops.length >= MAX_PATCH_OPS) break;
+    ops.push(reasoningOperation(messages[i], i, placeholder));
+  }
+  return { ops: ops, count: ops.length };
 }
 
 // 读取实例配置；配置缺失时退回默认值。
@@ -130,7 +194,12 @@ function prepare(ctx, req) {
   if (!hasTools(body)) return null;
   if (thinkingDisabled(body)) return null;
   if (!modelMatches(ctx, body, configString(ctx, "modelKeywords", "deepseek"))) return null;
-  return buildPatch(body, configString(ctx, "placeholder", " "));
+  const media = Array.isArray(req.media) ? req.media : [];
+  return buildPatch(
+    body,
+    configString(ctx, "placeholder", " "),
+    media.length === 0 && !hasInlineMedia(body.messages, 0),
+  );
 }
 
 function result(ctx, req) {

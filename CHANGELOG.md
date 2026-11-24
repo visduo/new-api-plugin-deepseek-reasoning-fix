@@ -1,16 +1,15 @@
 ---
 changelogVersion: 1
-plugin: "deepseek-reasoning-fix"
-version: "1.0.0"
+plugin: "visduo_deepseek-reasoning-fix"
+version: "1.0.1"
 locale: "en"
 translations:
   zh-CN: CHANGELOG.zh-CN.md
 ---
 # Changelog
 
-## [1.0.0]
+## [1.0.1]
 
-### Added
+### Fixed
 
-- Fill missing `reasoning_content` on assistant messages in DeepSeek thinking-mode requests that carry tools.
-- Configure the placeholder reasoning text and the comma-separated model keywords that select requests.
+- Use JSON Patch `copy` operations for existing reasoning text and combine longer conversations into one `replace /messages`, so the plugin result no longer repeats large reasoning content per message and adds less latency.
